@@ -47,3 +47,26 @@ train_df, test_df = prepare_training_data("data.pgn", num_games=20000)
 ```
 
 Adjust num_games to something lower, do know though that this will make the algorithm perform far worse. On my computer with an i7-2700kf, 32gb of ram, and a 1070 run 20,000 games in about 1 - 1.5 mins.
+
+The output for the run will be in a file with a name like `training_20241206_180634.log`. If you want to play with it to improve things, an easy way is to adjust the config at the top of the `main()` method in `main.py`:
+
+```py
+config = {
+    'BATCH_SIZE': 64,
+    'EPOCHS': 30,
+    'BASE_LR': 0.00005,
+    'MAX_LR': 0.0005,
+    'WEIGHT_DECAY': 0.0005,
+    'NUM_WORKERS': 8,
+    'PIN_MEMORY': True,
+    'PREFETCH_FACTOR': 4,
+    'DEVICE': torch.device('cuda' if torch.cuda.is_available() else 'cpu'),
+    'GRADIENT_CLIP': 0.5,
+    'PATIENCE': 10,        # Increased patience
+    'MIN_DELTA': 0.005      # Minimum improvement required
+}
+```
+
+It will save the best model from your training runs to best_model{timestamp}.pth. Later on I will make it so that you can actually use this, not sure how to do that yet and idek if we need to do that.
+
+Finally this code is super confusing, I can bearly follow it anymore, claude is ur best friend in explaining parts of it, Also u can hmu w any questions and Ill try to explain it as best as I can. Before uploading the code I told claude to add comments to everything, but I haven't read them so idek if they're helpful
