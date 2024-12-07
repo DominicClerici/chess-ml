@@ -5,6 +5,8 @@ from datetime import datetime
 import numpy as np
 from tqdm import tqdm
 from tqdm.auto import tqdm
+import pickle
+from pathlib import Path
 
 def safe_int_conversion(value, default=0):
     """
@@ -92,10 +94,27 @@ def create_move_sequences(games_df, max_moves=50):
     
     return result_df
 
-def prepare_training_data(file_path, num_games=None, max_moves=50):
+def prepare_training_data(file_path, num_games=None, max_moves=50, cache_dir='cached_data'):
     """
-    Main function to prepare chess data for ML training
+    Main function to prepare chess data for ML training with caching support
     """
+    # Create cache directory if it doesn't exist
+    cache_dir = Path(cache_dir)
+    cache_dir.mkdir(exist_ok=True)
+    
+    # Generate cache filename based on input parameters
+    cache_file = cache_dir / f'processed_data.pkl'
+    
+    # Try to load from cache first
+    if cache_file.exists():
+        print(f"Loading processed data from cache: {cache_file}")
+        with open(cache_file, 'rb') as f:
+            cached_data = pickle.load(f)
+            return cached_data['train_df'], cached_data['test_df']
+    
+    # If cache doesn't exist, process the data
+    print("Cache not found. Processing data...")
+    
     # Read games
     games_data = read_pgn_file(file_path, num_games)
     
@@ -119,6 +138,14 @@ def prepare_training_data(file_path, num_games=None, max_moves=50):
     # Create train/test split
     train_df = df_processed.iloc[:train_size]
     test_df = df_processed.iloc[train_size:train_size + test_size]
+    
+    # Save processed data to cache
+    print(f"Saving processed data to cache: {cache_file}")
+    with open(cache_file, 'wb') as f:
+        pickle.dump({
+            'train_df': train_df,
+            'test_df': test_df
+        }, f)
     
     print(f"\nTraining set size: {len(train_df)}")
     print(f"Testing set size: {len(test_df)}")

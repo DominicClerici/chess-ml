@@ -11,6 +11,10 @@ import logging
 from datetime import datetime
 import gc
 import pandas as pd
+import os
+import pickle
+from pathlib import Path
+import time
 
 # Import our modules
 from prepare_data import prepare_training_data
@@ -37,27 +41,51 @@ def setup_logging():
 
 
 class ChessDataset(Dataset):
-    """Custom Dataset for chess positions"""
-    def __init__(self, dataframe, move_to_idx, max_moves=1968):
+    """Custom Dataset for chess positions with caching support"""
+    def __init__(self, dataframe, move_to_idx, max_moves=1968, cache_dir='cached_data'):
         self.data = dataframe
         self.move_to_idx = move_to_idx
         self.max_moves = max_moves
+        self.cache_dir = Path(cache_dir)
         
-        # Process all moves into sequences of positions and target moves
-        self.positions = []
-        self.target_moves = []
+        # Create cache directory if it doesn't exist
+        self.cache_dir.mkdir(exist_ok=True)
         
-        # Add validation before processing
-        if len(dataframe) == 0:
-            raise ValueError("Empty dataframe provided to ChessDataset")
+        # Generate cache filename based on dataset characteristics
+        
+        self.cache_file = self.cache_dir / f'chess_dataset.pkl'
+        
+        # Try to load from cache first
+        if self.cache_file.exists():
+            print(f"Loading processed positions from cache: {self.cache_file}")
+            with open(self.cache_file, 'rb') as f:
+                cached_data = pickle.load(f)
+                self.positions = cached_data['positions']
+                self.target_moves = cached_data['target_moves']
+        else:
+            # Process data if cache doesn't exist
+            self.positions = []
+            self.target_moves = []
             
-        self._process_games()
+            # Add validation before processing
+            if len(dataframe) == 0:
+                raise ValueError("Empty dataframe provided to ChessDataset")
+                
+            self._process_games()
+            
+            # Save to cache
+            print(f"Saving processed positions to cache: {self.cache_file}")
+            with open(self.cache_file, 'wb') as f:
+                pickle.dump({
+                    'positions': self.positions,
+                    'target_moves': self.target_moves
+                }, f)
         
-        # Add validation after processing
+        # Add validation after loading/processing
         if len(self.positions) == 0:
             raise ValueError("No valid positions were processed from the games")
             
-        print(f"Dataset created with {len(self.positions)} positions")
+        print(f"Dataset ready with {len(self.positions)} positions")
         if self.target_moves:
             print(f"Max move index: {max(self.target_moves)}")
             print(f"Number of unique moves: {len(set(self.target_moves))}")
@@ -272,14 +300,6 @@ def train_epoch(model, train_loader, optimizer, scheduler, criterion, scaler, de
             correct_moves += (pred_moves == targets).sum().item()
             total_moves += targets.size(0)
             
-            # Print detailed batch information for debugging
-            if batch_idx % 5 == 0:
-                print(f"\nBatch {batch_idx} statistics:")
-                print(f"Batch size: {board_tensors.size(0)}")
-                print(f"Loss: {loss.item():.4f}")
-                print(f"Correct moves in batch: {(pred_moves == targets).sum().item()}")
-                print(f"Total moves so far: {total_moves}")
-            
             # Update progress bar
             progress_bar.set_postfix({
                 'loss': f'{loss.item():.4f}',
@@ -346,17 +366,17 @@ def main():
     config = {
         'BATCH_SIZE': 64,
         'EPOCHS': 30,          
-        'BASE_LR': 0.00005,     
-        'MAX_LR': 0.0005,       
-        'WEIGHT_DECAY': 0.0005, 
+        'BASE_LR': 0.0002,     # Increased initial learning rate
+        'MIN_LR': 0.000002,    # Final learning rate
+        'WEIGHT_DECAY': 0.00025, 
         'NUM_WORKERS': 8,
         'PIN_MEMORY': True,
         'PREFETCH_FACTOR': 4,
         'DEVICE': torch.device('cuda' if torch.cuda.is_available() else 'cpu'),
-        'GRADIENT_CLIP': 0.5,
-        'PATIENCE': 10,        # Increased patience
-        'MIN_DELTA': 0.005      # Minimum improvement required
+        'GRADIENT_CLIP': 0.75,
+        'MIN_DELTA': 0.0005   
     }
+
     
     logging.info("Training configuration:")
     for key, value in config.items():
@@ -365,7 +385,8 @@ def main():
 
     # Load and prepare data
     logging.info("Loading chess games...")
-    train_df, test_df = prepare_training_data("data.pgn", num_games=20000)
+    train_df, test_df = prepare_training_data("data.pgn", num_games=121332, cache_dir='cached_data')
+
     
     if len(train_df) == 0 or len(test_df) == 0:
         raise ValueError("No data loaded from PGN file")
@@ -378,8 +399,8 @@ def main():
     
     # Create datasets with try-except
     try:
-        train_dataset = ChessDataset(train_df, move_to_idx)
-        test_dataset = ChessDataset(test_df, move_to_idx)
+        train_dataset = ChessDataset(train_df, move_to_idx, cache_dir='cached_data')
+        test_dataset = ChessDataset(test_df, move_to_idx, cache_dir='cached_data')
     except Exception as e:
         logging.error(f"Failed to create datasets: {str(e)}")
         raise
@@ -422,26 +443,34 @@ def main():
         model.parameters(),
         lr=config['BASE_LR'],
         weight_decay=config['WEIGHT_DECAY'],
-        betas=(0.9, 0.999)
+        betas=(0.95, 0.999)
     )
 
     scheduler = OneCycleLR(
         optimizer,
-        max_lr=config['MAX_LR'],
+        max_lr=config['BASE_LR'],
         epochs=config['EPOCHS'],
         steps_per_epoch=len(train_loader),
-        pct_start=0.3,        # Slower warmup
-        div_factor=25,        # Larger division factor
-        final_div_factor=1e4, # Larger final division
+        pct_start=0.075,          # Only spend 10% of time warming up
+        div_factor=1.0,         # Start at max_lr
+        final_div_factor=100,   # End at min_lr
         anneal_strategy='cos'
     )
+    
+    # Option 2: Alternative - CosineAnnealingLR
+    # from torch.optim.lr_scheduler import CosineAnnealingLR
+    # scheduler = CosineAnnealingLR(
+    #     optimizer,
+    #     T_max=config['EPOCHS'] * len(train_loader),
+    #     eta_min=config['MIN_LR']
+    # )
 
     scaler = GradScaler()
     
     
     best_accuracy = 0
-    patience_counter = 0
     moving_avg_accuracy = []
+    training_start_time = time.time()
     
     for epoch in range(config['EPOCHS']):
         epoch_metrics = {'epoch': epoch + 1}
@@ -470,7 +499,6 @@ def main():
             moving_avg_accuracy.append(val_acc)
             if len(moving_avg_accuracy) > 5:
                 moving_avg_accuracy.pop(0)
-            current_avg = sum(moving_avg_accuracy) / len(moving_avg_accuracy)
             
             # Learning rate
             current_lr = scheduler.get_last_lr()[0]
@@ -489,13 +517,6 @@ def main():
                     'config': config,
                 }, f'best_model_{timestamp}.pth')
                 logging.info(f"Saved new best model with accuracy: {best_accuracy:.4f}")
-                patience_counter = 0
-            else:
-                patience_counter += 1
-                if patience_counter >= config['PATIENCE']:
-                    logging.info(f"Early stopping triggered after {epoch + 1} epochs")
-                    logging.info(f"Best validation accuracy: {best_accuracy:.4f}")
-                    break
             
         except Exception as e:
             logging.error(f"Error during epoch {epoch+1}: {str(e)}")
@@ -503,8 +524,14 @@ def main():
             traceback.print_exc()
             break
 
+    
+    training_end_time = time.time()
+    training_duration = training_end_time - training_start_time
+    logging.info(f"Training completed in {training_duration:.2f} seconds")
+
 
 
 
 if __name__ == "__main__":
     main()
+    
