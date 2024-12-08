@@ -106,14 +106,16 @@ class ChessGUI:
             )
     
     def board_to_tensor(self):
-        """Convert current board position to tensor format"""
+        """Convert board position to tensor format"""
         tensor = torch.zeros(16, 8, 8, dtype=torch.float32)
         
+        # Piece placement (channels 0-11)
         piece_idx = {
             'P': 0, 'N': 1, 'B': 2, 'R': 3, 'Q': 4, 'K': 5,
             'p': 6, 'n': 7, 'b': 8, 'r': 9, 'q': 10, 'k': 11
         }
         
+        # Fill piece positions
         for square in chess.SQUARES:
             piece = self.board.piece_at(square)
             if piece:
@@ -122,18 +124,24 @@ class ChessGUI:
                 idx = piece_idx[piece.symbol()]
                 tensor[idx][rank][file] = 1.0
         
+        # Additional features
+        # Castling rights (channel 12)
         tensor[12][0][0] = float(self.board.has_kingside_castling_rights(chess.WHITE))
         tensor[12][0][1] = float(self.board.has_queenside_castling_rights(chess.WHITE))
         tensor[12][7][0] = float(self.board.has_kingside_castling_rights(chess.BLACK))
         tensor[12][7][1] = float(self.board.has_queenside_castling_rights(chess.BLACK))
         
+        # En passant (channel 13)
         if self.board.ep_square is not None:
             rank = self.board.ep_square // 8
             file = self.board.ep_square % 8
             tensor[13][rank][file] = 1.0
         
+        # Turn (channel 14)
         tensor[14].fill_(float(self.board.turn))
-        tensor[15].fill_(float(self.board.fullmove_number) / 100.0)
+        
+        # Move number (channel 15)
+        tensor[15].fill_(float(self.board.fullmove_number) / 100.0)  # Normalized
         
         return tensor
     
@@ -240,7 +248,7 @@ class ChessGUI:
 
 def main():
     # Specify your model path here
-    model_path = "best_model.pth"  # Replace with your model path
+    model_path = "working.pth"  # Replace with your model path
     
     root = tk.Tk()
     app = ChessGUI(root, model_path)

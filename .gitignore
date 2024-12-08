@@ -61,3 +61,8 @@ training_*/
 *.tmp
 *.temp
 *.bak
+
+# cache
+cached_data/
+*.pkl
+*.pickle

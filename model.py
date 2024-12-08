@@ -14,7 +14,7 @@ class ChessEncoder(nn.Module):
         # - Piece type (6 pieces + empty = 7)
         # - Piece color (2)
         # - Additional features (castling rights, en passant, etc.)
-        self.input_channels = 16
+        self.input_channels = 20
         
         # Convolutional layers to process the board
         self.conv_layers = nn.Sequential(
@@ -29,6 +29,7 @@ class ChessEncoder(nn.Module):
             nn.Conv2d(128, 256, kernel_size=3, padding=1),
             nn.ReLU(),
             nn.BatchNorm2d(256),
+        
         )
         
         # Global features processing (castling rights, en passant, etc.)
@@ -44,6 +45,9 @@ class ChessEncoder(nn.Module):
             nn.ReLU(),
             nn.LayerNorm(board_embedding_size)
         )
+
+        # Add spatial attention
+        self.spatial_attention = SpatialAttention(256)
 
     def forward(self, board_tensor, global_features):
         # Process board
@@ -119,6 +123,15 @@ class ChessModel(nn.Module):
         move_logits, evaluation = self.predictor(board_embedding)
         
         return move_logits, evaluation
+
+class SpatialAttention(nn.Module):
+    def __init__(self, channels):
+        super().__init__()
+        self.conv = nn.Conv2d(channels, 1, kernel_size=1)
+        
+    def forward(self, x):
+        attention = torch.sigmoid(self.conv(x))
+        return x * attention
 
 def create_move_mapping():
     """

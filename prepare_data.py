@@ -29,14 +29,10 @@ def read_pgn_file(file_path, num_games=None):
         
         while True:
             game = chess.pgn.read_game(pgn)
-            if game is None:  # End of file
-                break
-                
-            if num_games and games_processed >= num_games:
+            if game is None or (num_games and games_processed >= num_games):
                 break
                 
             try:
-                # Extract game information with safe conversion for ratings
                 game_data = {
                     'white_player': game.headers.get('White', 'Unknown'),
                     'black_player': game.headers.get('Black', 'Unknown'),
@@ -50,8 +46,16 @@ def read_pgn_file(file_path, num_games=None):
                     'date': game.headers.get('Date', 'Unknown')
                 }
                 
-                # Only append games that have moves
-                if game_data['moves'].strip():
+                # Apply all filtering conditions
+                moves_count = len(game_data['moves'].split())
+                is_valid = (
+                    game_data['result'] != '*' and  # Game finished
+                    20 < moves_count < 100 and      # Reasonable game length
+                    game_data['white_rating'] > 1500 and  # Higher rated players
+                    game_data['black_rating'] > 1500
+                )
+                
+                if is_valid:
                     games_data.append(game_data)
                     games_processed += 1
                     pbar.update(1)
@@ -132,7 +136,7 @@ def prepare_training_data(file_path, num_games=None, max_moves=50, cache_dir='ca
     
     # Ensure we have enough games for the split
     total_games = len(df_processed)
-    train_size = int(total_games * 0.2)  # Use 20%
+    train_size = int(total_games * 0.7)  # Use 20%
     test_size = total_games - train_size
     
     # Create train/test split

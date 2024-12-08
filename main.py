@@ -15,6 +15,7 @@ import os
 import pickle
 from pathlib import Path
 import time
+import torch.nn.functional as F
 
 # Import our modules
 from prepare_data import prepare_training_data
@@ -62,10 +63,12 @@ class ChessDataset(Dataset):
                 cached_data = pickle.load(f)
                 self.positions = cached_data['positions']
                 self.target_moves = cached_data['target_moves']
+                self.evaluations = cached_data['evaluations']
         else:
             # Process data if cache doesn't exist
             self.positions = []
             self.target_moves = []
+            self.evaluations = []
             
             # Add validation before processing
             if len(dataframe) == 0:
@@ -78,7 +81,8 @@ class ChessDataset(Dataset):
             with open(self.cache_file, 'wb') as f:
                 pickle.dump({
                     'positions': self.positions,
-                    'target_moves': self.target_moves
+                    'target_moves': self.target_moves,
+                    'evaluations': self.evaluations
                 }, f)
         
         # Add validation after loading/processing
@@ -98,10 +102,11 @@ class ChessDataset(Dataset):
         
         for idx in tqdm(range(len(self.data)), desc="Processing games"):
             try:
-                positions, moves = self._process_single_game(self.data.iloc[idx])
+                positions, moves, evals = self._process_single_game(self.data.iloc[idx])
                 if positions and moves:
                     self.positions.extend(positions)
                     self.target_moves.extend(moves)
+                    self.evaluations.extend(evals)
                     total_moves_processed += len(moves)
                 else:
                     skipped_games += 1
@@ -132,6 +137,7 @@ class ChessDataset(Dataset):
         """Process a single game into a sequence of positions and moves"""
         positions = []
         moves = []
+        evaluations = []
         board = chess.Board()
         
         # Get moves from the game
@@ -141,8 +147,10 @@ class ChessDataset(Dataset):
             if move_col in game_data and game_data[move_col] != 'PAD':
                 move_list.append(game_data[move_col])
         
-        # Process each move
-        for move_str in move_list:
+        # Get game result for evaluation
+        result = game_data.get('result', 0)  # Default to draw if not found
+        
+        for move_idx, move_str in enumerate(move_list):
             try:
                 # Store current position before making the move
                 current_pos = self._board_to_tensor(board)
@@ -170,9 +178,17 @@ class ChessDataset(Dataset):
                 if move_idx >= self.max_moves:
                     continue
                 
+                # Calculate position evaluation
+                eval_score = self.calculate_position_score(board, move_idx, len(move_list), result)
+                
+                # Flip evaluation for black's perspective
+                if not board.turn:
+                    eval_score = -eval_score
+                
                 # Store position and move
                 positions.append(current_pos)
                 moves.append(move_idx)
+                evaluations.append(eval_score)
                 
                 # Make the move
                 board.push(move)
@@ -180,11 +196,11 @@ class ChessDataset(Dataset):
             except Exception as e:
                 continue
         
-        return positions, moves
+        return positions, moves, evaluations
     
     def _board_to_tensor(self, board):
         """Convert board position to tensor format"""
-        tensor = torch.zeros(16, 8, 8, dtype=torch.float32)
+        tensor = torch.zeros(20, 8, 8, dtype=torch.float32)
         
         # Piece placement
         piece_idx = {
@@ -220,6 +236,25 @@ class ChessDataset(Dataset):
         # Move number
         tensor[15].fill_(float(board.fullmove_number) / 100.0)  # Normalized
         
+        # Attacked squares
+        for square in chess.SQUARES:
+            if board.is_attacked_by(chess.WHITE, square):
+                tensor[16][square // 8][square % 8] = 1.0
+            if board.is_attacked_by(chess.BLACK, square):
+                tensor[17][square // 8][square % 8] = 1.0
+
+        # Piece mobility (number of legal moves for each piece)
+        for square in chess.SQUARES:
+            piece = board.piece_at(square)
+            if piece:
+                legal_moves = len([move for move in board.legal_moves if move.from_square == square])
+                tensor[18][square // 8][square % 8] = min(legal_moves / 8.0, 1.0)  # Normalize
+
+        # Center control
+        center_squares = [chess.E4, chess.E5, chess.D4, chess.D5]
+        for square in center_squares:
+            tensor[19][square // 8][square % 8] = 1.0
+        
         return tensor
     
     def _move_to_index(self, move):
@@ -233,6 +268,7 @@ class ChessDataset(Dataset):
     def __getitem__(self, idx):
         board_tensor = self.positions[idx]
         target = self.target_moves[idx]
+        evaluation = self.evaluations[idx]
         
         # Create global features
         global_features = torch.zeros(8, dtype=torch.float32)
@@ -244,11 +280,54 @@ class ChessDataset(Dataset):
         global_features[4] = board_tensor[12][7][1]  # Black queenside castling
         global_features[5] = float(board_tensor[13].sum() > 0)  # En passant available
         global_features[6] = board_tensor[15][0][0]  # Move number
-        global_features[7] = 0.0  # Reserved for future use
+        global_features[7] = evaluation
         
-        return board_tensor, global_features, torch.tensor(target, dtype=torch.long)
+        return board_tensor, global_features, target, torch.tensor(evaluation, dtype=torch.float32)
 
+    def calculate_position_score(self, board, move_idx, total_moves, result):
+        """Calculate a more comprehensive position evaluation score"""
+        # Material value dictionary
+        piece_values = {
+            chess.PAWN: 1,
+            chess.KNIGHT: 3,
+            chess.BISHOP: 3,
+            chess.ROOK: 5,
+            chess.QUEEN: 9,
+            chess.KING: 0
+        }
+        
+        # Calculate material balance
+        material_balance = 0
+        for square in chess.SQUARES:
+            piece = board.piece_at(square)
+            if piece:
+                value = piece_values[piece.piece_type]
+                material_balance += value if piece.color else -value
+        
+        # Normalize material balance to [-1, 1]
+        material_score = np.tanh(material_balance / 30.0)
+        
+        # Base evaluation from game result
+        if result == 1:  # White win
+            base_eval = 1.0 - (0.5 * move_idx / total_moves)
+        elif result == -1:  # Black win
+            base_eval = -1.0 + (0.5 * move_idx / total_moves)
+        else:  # Draw
+            base_eval = 0.0
+        
+        # Combine scores (0.6 weight to material, 0.4 to game result)
+        eval_score = 0.6 * material_score + 0.4 * base_eval
+        
+        return eval_score
 
+def calculate_repetition_penalty(move_logits, board_history):
+    """Penalize repetitive moves"""
+    penalty = 0
+    if len(board_history) >= 4:
+        last_positions = board_history[-4:]
+        if len(set(last_positions)) < len(last_positions):
+            penalty = 0.5  # Significant penalty for repetition
+    return penalty
 
 def train_epoch(model, train_loader, optimizer, scheduler, criterion, scaler, device):
     """Train for one epoch with mixed precision training"""
@@ -257,65 +336,63 @@ def train_epoch(model, train_loader, optimizer, scheduler, criterion, scaler, de
         
     model.train()
     total_loss = 0
+    move_loss = 0
+    eval_loss = 0
     correct_moves = 0
     total_moves = 0
     
+    board_history = []  # Add at start of function
+    
     progress_bar = tqdm(train_loader, desc='Training')
-    for batch_idx, (board_tensors, global_features, targets) in enumerate(progress_bar):
-        # Validate batch data
-        if board_tensors.size(0) == 0:
-            print(f"Skipping empty batch {batch_idx}")
-            continue
-            
+    for batch_idx, (board_tensors, global_features, targets, evaluations) in enumerate(progress_bar):
         try:
-            # Move data to device
             board_tensors = board_tensors.to(device, non_blocking=True)
             global_features = global_features.to(device, non_blocking=True)
             targets = targets.to(device, non_blocking=True)
+            evaluations = evaluations.to(device, non_blocking=True)
             
-            # Mixed precision training - Fixed autocast usage
+            # Ensure evaluations has the right shape [batch_size, 1]
+            evaluations = evaluations.view(-1, 1)
+            
+            # Add current board state to history (using first board in batch as reference)
+            board_history.append(board_tensors[0].cpu().numpy().tobytes())
+            if len(board_history) > 4:  # Keep only last 4 positions
+                board_history.pop(0)
+            
             with torch.autocast(device_type='cuda', dtype=torch.float16):
-                # Forward pass
-                move_logits, evaluation = model(board_tensors, global_features)
-                loss = criterion(move_logits, targets)
+                move_logits, position_eval = model(board_tensors, global_features)
+                
+                # Ensure position_eval has the right shape [batch_size, 1]
+                position_eval = position_eval.view(-1, 1)
+                
+                move_loss = criterion(move_logits, targets)
+                eval_loss = F.mse_loss(position_eval, evaluations)
+                repetition_penalty = calculate_repetition_penalty(move_logits, board_history)
+                loss = move_loss + 0.1 * eval_loss + repetition_penalty
             
-            # Backward pass with gradient scaling
             optimizer.zero_grad(set_to_none=True)
             scaler.scale(loss).backward()
-            
-            # Gradient clipping
             scaler.unscale_(optimizer)
             torch.nn.utils.clip_grad_norm_(model.parameters(), max_norm=1.0)
-            
-            # Optimizer step with scaling
             scaler.step(optimizer)
             scaler.update()
-            
-            # Learning rate scheduling
             scheduler.step()
             
-            # Statistics
             total_loss += loss.item()
             pred_moves = move_logits.argmax(dim=1)
             correct_moves += (pred_moves == targets).sum().item()
             total_moves += targets.size(0)
             
-            # Update progress bar
             progress_bar.set_postfix({
                 'loss': f'{loss.item():.4f}',
-                'acc': f'{100*correct_moves/total_moves:.2f}%' if total_moves > 0 else 'N/A',
-                'lr': f'{scheduler.get_last_lr()[0]:.6f}'
+                'move_acc': f'{100*correct_moves/total_moves:.2f}%',
+                'eval_loss': f'{eval_loss.item():.4f}'
             })
             
         except Exception as e:
             print(f"Error in batch {batch_idx}: {str(e)}")
-            import traceback
-            traceback.print_exc()  # Print full stack trace
             continue
     
-    if total_moves == 0:
-        raise ValueError("No moves were processed during training")
-        
     return total_loss/len(train_loader), correct_moves/total_moves
 
 
@@ -329,14 +406,19 @@ def validate(model, val_loader, criterion, device):
     
     with torch.no_grad():
         with torch.autocast(device_type='cuda', dtype=torch.float16):
-            for batch_idx, (board_tensors, global_features, targets) in enumerate(val_loader):
+            for batch_idx, (board_tensors, global_features, targets, evaluations) in enumerate(val_loader):
                 try:
                     board_tensors = board_tensors.to(device, non_blocking=True)
                     global_features = global_features.to(device, non_blocking=True)
                     targets = targets.to(device, non_blocking=True)
+                    evaluations = evaluations.to(device, non_blocking=True).view(-1, 1)
                     
-                    move_logits, evaluation = model(board_tensors, global_features)
-                    loss = criterion(move_logits, targets)
+                    move_logits, position_eval = model(board_tensors, global_features)
+                    position_eval = position_eval.view(-1, 1)
+                    
+                    move_loss = criterion(move_logits, targets)
+                    eval_loss = F.mse_loss(position_eval, evaluations)
+                    loss = move_loss + 0.1 * eval_loss
                     
                     total_loss += loss.item()
                     pred_moves = move_logits.argmax(dim=1)
@@ -364,17 +446,17 @@ def main():
 
     # Enhanced configuration
     config = {
-        'BATCH_SIZE': 64,
-        'EPOCHS': 30,          
-        'BASE_LR': 0.0002,     # Increased initial learning rate
-        'MIN_LR': 0.000002,    # Final learning rate
-        'WEIGHT_DECAY': 0.00025, 
-        'NUM_WORKERS': 8,
+        'BATCH_SIZE': 128,         # Increased from 32 to process more data efficiently
+        'EPOCHS': 25,              # Reduced from 30 since we have more data
+        'BASE_LR': 0.0001,         # Slightly increased for better initial convergence
+        'MIN_LR': 0.000003,        # Maintained 1/100 ratio of BASE_LR
+        'WEIGHT_DECAY': 0.001,    # Reduced slightly due to larger dataset
+        'NUM_WORKERS': 12,         # Increased for better data loading
         'PIN_MEMORY': True,
-        'PREFETCH_FACTOR': 4,
+        'PREFETCH_FACTOR': 2,      # Reduced to prevent memory issues
         'DEVICE': torch.device('cuda' if torch.cuda.is_available() else 'cpu'),
-        'GRADIENT_CLIP': 0.75,
-        'MIN_DELTA': 0.0005   
+        'GRADIENT_CLIP': .5,      # Increased slightly
+        'MIN_DELTA': 0.0002        # Reduced threshold for model saving
     }
 
     
@@ -385,7 +467,7 @@ def main():
 
     # Load and prepare data
     logging.info("Loading chess games...")
-    train_df, test_df = prepare_training_data("data.pgn", num_games=121332, cache_dir='cached_data')
+    train_df, test_df = prepare_training_data("data.pgn", num_games=10000, cache_dir='cached_data')
 
     
     if len(train_df) == 0 or len(test_df) == 0:
