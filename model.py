@@ -22,13 +22,13 @@ class Node:
         self.children.append(child)
         return child
         
-    def ucb1(self, exploration=1.41):
+    def ucb1(self, exploration=0.7):
         if self.visits == 0:
             return float('inf')
         return (self.wins / self.visits) + exploration * math.sqrt(math.log(self.parent.visits) / self.visits)
 
 class ChessAI:
-    def __init__(self, simulation_time=3):
+    def __init__(self, simulation_time=10):
         self.simulation_time = simulation_time
         
         self.piece_values = {
@@ -103,16 +103,50 @@ class ChessAI:
             
         score = 0
         
+        # Add piece safety evaluation with stronger penalties
         for square in chess.SQUARES:
             piece = board.piece_at(square)
             if piece:
                 value = self.piece_values[piece.piece_type]
                 if piece.color == chess.WHITE:
                     score += value
+                    # Penalize if piece is under attack
+                    if board.is_attacked_by(chess.BLACK, square):
+                        defender_count = len(board.attackers(chess.WHITE, square))
+                        attacker_count = len(board.attackers(chess.BLACK, square))
+                        if attacker_count > defender_count:
+                            # Much higher penalty for undefended pieces
+                            score -= value * 0.8
+                        elif attacker_count == defender_count:
+                            # Penalty even when equally defended
+                            score -= value * 0.3
                 else:
                     score -= value
-                    
+                    if board.is_attacked_by(chess.WHITE, square):
+                        defender_count = len(board.attackers(chess.BLACK, square))
+                        attacker_count = len(board.attackers(chess.WHITE, square))
+                        if attacker_count > defender_count:
+                            score += value * 0.8
+                        elif attacker_count == defender_count:
+                            score += value * 0.3
+                
                 score += self.evaluate_piece_position(board, piece, square)
+        
+        # Add immediate capture evaluation
+        for move in board.legal_moves:
+            if board.is_capture(move):
+                board.push(move)
+                captured_value = 0
+                # Check if the capturing piece is safe
+                if not board.is_attacked_by(not board.turn, move.to_square):
+                    piece = board.piece_at(move.to_square)
+                    if piece:
+                        captured_value = self.piece_values[piece.piece_type]
+                board.pop()
+                if board.turn:
+                    score += captured_value * 0.2  # Bonus for safe captures
+                else:
+                    score -= captured_value * 0.2
         
         w_king_square = board.king(chess.WHITE)
         b_king_square = board.king(chess.BLACK)
@@ -232,25 +266,46 @@ class ChessAI:
         return node
 
     def simulate(self, board):
-        """Smart simulation with basic tactics"""
+        """Smart simulation with improved piece protection and capture awareness"""
         board = board.copy()
         playout_depth = 50
         
         for _ in range(playout_depth):
             if board.is_game_over():
                 break
-                
+            
             legal_moves = list(board.legal_moves)
             if not legal_moves:
                 break
-                
-            if random.random() < 0.9:  # 90% of the time use evaluation
+            
+            if random.random() < 0.98:  # Increased to 98% evaluation-based moves
                 best_moves = []
                 best_eval = float('-inf')
                 
                 for move in legal_moves:
+                    # Prioritize captures and piece safety
                     board.push(move)
-                    eval = -self.evaluate_position(board)
+                    
+                    # Heavy penalties for unsafe pieces
+                    piece_safety_penalty = 0
+                    for square in chess.SQUARES:
+                        piece = board.piece_at(square)
+                        if piece and piece.color == board.turn:
+                            if board.is_attacked_by(not board.turn, square):
+                                defenders = len(board.attackers(board.turn, square))
+                                attackers = len(board.attackers(not board.turn, square))
+                                if attackers > defenders:
+                                    # Much larger penalty for hanging pieces
+                                    piece_safety_penalty -= self.piece_values[piece.piece_type] * 1.0
+                    
+                    # Bonus for captures
+                    capture_bonus = 0
+                    if board.is_capture(move):
+                        captured_piece = board.piece_at(move.to_square)
+                        if captured_piece:
+                            capture_bonus = self.piece_values[captured_piece.piece_type] * 0.5
+                    
+                    eval = -self.evaluate_position(board) + piece_safety_penalty + capture_bonus
                     board.pop()
                     
                     if eval > best_eval:
@@ -260,7 +315,7 @@ class ChessAI:
                         best_moves.append(move)
                 
                 board.push(random.choice(best_moves))
-            else:  # 10% random moves for exploration
+            else:
                 board.push(random.choice(legal_moves))
         
         return self.evaluate_position(board)
