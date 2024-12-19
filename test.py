@@ -273,7 +273,7 @@ def main():
         results = tester.test_against_stockfish(
             # elo_ratings=[200,400,600,800,1000],
             elo_ratings=[50,100,150,200],
-            games_per_level=5
+            games_per_level=10
         )
         
         tester.generate_report()
