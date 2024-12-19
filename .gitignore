@@ -66,3 +66,7 @@ training_*/
 cached_data/
 *.pkl
 *.pickle
+
+# stockfish
+stockfish.exe
+

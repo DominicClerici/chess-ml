@@ -224,7 +224,6 @@ class ChessGUI:
         self.board.push(move)
         self.update_board_display()
         
-        # separate thread to prevent freezing
         if not self.check_game_over() and not self.board.is_game_over():
             threading.Thread(target=self.ai_move, daemon=True).start()
 
