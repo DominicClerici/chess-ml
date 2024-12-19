@@ -16,7 +16,9 @@ class ChessAITester:
         Initialize the tester with paths to engines
         """
 
-        if not Path("stockfish.exe").exists():
+        stockfish_path = "stockfish.exe"
+
+        if not Path(stockfish_path).exists():
             raise FileNotFoundError("Stockfish not found. Please provide valid path to Stockfish executable")
             
         self.stockfish = Stockfish(path=stockfish_path)
@@ -270,8 +272,8 @@ def main():
         print("Starting chess AI testing...")
         results = tester.test_against_stockfish(
             # elo_ratings=[200,400,600,800,1000],
-            elo_ratings=[200],
-            games_per_level=1
+            elo_ratings=[50,100,150,200],
+            games_per_level=5
         )
         
         tester.generate_report()
