@@ -70,3 +70,7 @@ cached_data/
 # stockfish
 stockfish.exe
 
+# generated files
+chess_ai_results.html
+win_rate_plot.png
+
